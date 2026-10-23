@@ -1,0 +1,730 @@
+// =============================================================================
+//  Pain Clinic Management System — Prisma schema (PostgreSQL 15+)
+//  Quy ước: bảng snake_case (@@map), cột camelCase (mặc định Prisma),
+//  khóa chính UUID, mốc thời gian lịch hẹn dùng timestamptz.
+//  Các ràng buộc Prisma chưa hỗ trợ (EXCLUDE, CHECK) nằm ở
+//  prisma/sql/scheduling_constraints.sql — xem README mục "Chống trùng lịch".
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────── Enums ──────────────────────────────────────
+
+enum Role {
+  ADMIN
+  DOCTOR
+  TECHNICIAN // Kỹ thuật viên (VLTL, phụ thủ thuật)
+  RECEPTIONIST // Lễ tân / Thu ngân
+  PHARMACIST
+  PATIENT
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+enum AllergySeverity {
+  MILD
+  MODERATE
+  SEVERE
+}
+
+enum HistoryType {
+  MEDICAL // Tiền sử nội khoa
+  SURGICAL // Tiền sử phẫu thuật
+  FAMILY
+  SOCIAL // Hút thuốc, rượu bia, nghề nghiệp...
+}
+
+enum RoomType {
+  CONSULT
+  PROCEDURE
+  PHYSIOTHERAPY
+  IMAGING
+}
+
+enum ServiceType {
+  CONSULTATION
+  PROCEDURE
+  PHYSIOTHERAPY
+  IMAGING
+  LAB
+}
+
+enum AppointmentStatus {
+  PENDING
+  CONFIRMED
+  CHECKED_IN
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+enum AppointmentSource {
+  ONLINE // Bệnh nhân tự đặt qua portal
+  COUNTER // Lễ tân đặt tại quầy / qua điện thoại
+}
+
+enum EncounterStatus {
+  CHECKED_IN // Tiếp đón
+  IN_EXAM // Khám lâm sàng & đo chỉ số
+  AWAITING_RESULTS // Chờ kết quả cận lâm sàng
+  TREATMENT // Chẩn đoán, kê đơn / làm thủ thuật
+  AWAITING_PAYMENT
+  CLOSED
+}
+
+enum PainScale {
+  VAS // Visual Analog Scale (0–100 mm, quy đổi 0–10)
+  NRS // Numeric Rating Scale 0–10
+}
+
+enum PainType {
+  NOCICEPTIVE
+  NEUROPATHIC
+  MIXED
+  NOCIPLASTIC
+}
+
+enum PainContext {
+  BASELINE
+  PRE_PROCEDURE
+  POST_PROCEDURE
+  FOLLOW_UP
+  SELF_REPORT // Bệnh nhân tự báo qua portal
+}
+
+enum OrderStatus {
+  ORDERED
+  IN_PROGRESS
+  RESULTED
+  CANCELLED
+}
+
+enum PrescriptionStatus {
+  DRAFT
+  ISSUED
+  DISPENSED
+  CANCELLED
+}
+
+enum ProcedureType {
+  EPIDURAL_STEROID_INJECTION // Tiêm ngoài màng cứng
+  NERVE_BLOCK // Phong bế thần kinh
+  RADIOFREQUENCY_ABLATION // Đốt sóng cao tần
+  FACET_JOINT_INJECTION
+  TRIGGER_POINT_INJECTION
+  PRP_INJECTION
+  PHYSIOTHERAPY // Vật lý trị liệu
+  OTHER
+}
+
+enum Laterality {
+  LEFT
+  RIGHT
+  BILATERAL
+  MIDLINE
+}
+
+enum ImageGuidance {
+  NONE
+  ULTRASOUND
+  FLUOROSCOPY
+  CT
+}
+
+enum InventoryKind {
+  DRUG
+  CONSUMABLE // Vật tư tiêu hao: kim Tuohy, kim tủy sống, bơm tiêm LOR...
+  DEVICE
+}
+
+enum StockMovementType {
+  RECEIPT
+  DISPENSE // Xuất theo đơn thuốc
+  PROCEDURE_USE // Xuất theo thủ thuật
+  ADJUSTMENT
+  RETURN
+  EXPIRED
+}
+
+enum InvoiceStatus {
+  DRAFT
+  ISSUED
+  PARTIALLY_PAID
+  PAID
+  VOID
+}
+
+enum InvoiceItemKind {
+  SERVICE
+  DRUG
+  SUPPLY
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+  BANK_TRANSFER
+  EWALLET
+  INSURANCE
+}
+
+enum NotificationChannel {
+  SMS
+  ZALO
+  EMAIL
+}
+
+enum OutboxStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+// ─────────────────────────── Identity & RBAC ────────────────────────────────
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  email        String?  @unique
+  phone        String?  @unique
+  passwordHash String
+  fullName     String
+  role         Role
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime @updatedAt @db.Timestamptz(3)
+
+  staff               Staff?
+  patient             Patient?
+  createdAppointments Appointment[]
+  auditLogs           AuditLog[]
+
+  @@map("users")
+}
+
+/// Hồ sơ nhân sự y tế (bác sĩ, KTV, dược sĩ, lễ tân) — 1-1 với User.
+model Staff {
+  id        String  @id @default(uuid()) @db.Uuid
+  userId    String  @unique @db.Uuid
+  title     String? // "BSCKII", "ThS.BS"...
+  specialty String? // "Gây mê hồi sức – Điều trị đau"
+  licenseNo String? // Số chứng chỉ hành nghề
+  color     String? // Màu hiển thị trên lịch
+
+  user             User              @relation(fields: [userId], references: [id])
+  shifts           WorkShift[]
+  appointments     Appointment[]
+  encounters       Encounter[]
+  prescriptions    Prescription[]
+  procedures       ProcedureRecord[]
+  painAssessments  PainAssessment[]
+  clinicalOrders   ClinicalOrder[]
+
+  @@map("staff")
+}
+
+// ───────────────────────── Patients & EMR ───────────────────────────────────
+
+model Patient {
+  id               String    @id @default(uuid()) @db.Uuid
+  code             String    @unique // BN-000123
+  userId           String?   @unique @db.Uuid // Tài khoản portal (nếu có)
+  fullName         String
+  dateOfBirth      DateTime  @db.Date
+  gender           Gender
+  phone            String
+  email            String?
+  nationalId       String?   @unique // CCCD — dữ liệu nhạy cảm, nên mã hóa ở tầng app
+  address          String?
+  occupation       String?
+  insuranceNo      String? // Mã thẻ BHYT
+  insuranceExpiry  DateTime? @db.Date
+  emergencyContact Json? // { name, relation, phone }
+  createdAt        DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime  @updatedAt @db.Timestamptz(3)
+
+  user            User?            @relation(fields: [userId], references: [id])
+  allergies       Allergy[]
+  histories       MedicalHistory[]
+  appointments    Appointment[]
+  encounters      Encounter[]
+  painAssessments PainAssessment[]
+  invoices        Invoice[]
+
+  @@index([phone])
+  @@index([fullName])
+  @@map("patients")
+}
+
+model Allergy {
+  id        String          @id @default(uuid()) @db.Uuid
+  patientId String          @db.Uuid
+  substance String // Hoạt chất / tác nhân (vd: "Lidocaine", "Iod cản quang")
+  itemId    String?         @db.Uuid // Liên kết danh mục thuốc để cảnh báo khi kê đơn
+  reaction  String?
+  severity  AllergySeverity
+  notedAt   DateTime        @default(now()) @db.Timestamptz(3)
+
+  patient Patient        @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  item    InventoryItem? @relation(fields: [itemId], references: [id])
+
+  @@index([patientId])
+  @@map("allergies")
+}
+
+model MedicalHistory {
+  id          String      @id @default(uuid()) @db.Uuid
+  patientId   String      @db.Uuid
+  type        HistoryType
+  description String
+  icd10Code   String?
+  since       DateTime?   @db.Date
+
+  patient Patient @relation(fields: [patientId], references: [id], onDelete: Cascade)
+
+  @@index([patientId])
+  @@map("medical_histories")
+}
+
+/// Lượt khám (Encounter) = một "bệnh án" ngoại trú, đi qua quy trình khép kín:
+/// Tiếp đón → Khám & đo chỉ số → Chỉ định CLS → Chẩn đoán & KH điều trị → Kê đơn/Thủ thuật → Thanh toán.
+model Encounter {
+  id             String          @id @default(uuid()) @db.Uuid
+  code           String          @unique
+  patientId      String          @db.Uuid
+  appointmentId  String?         @unique @db.Uuid
+  doctorId       String?         @db.Uuid
+  status         EncounterStatus @default(CHECKED_IN)
+  chiefComplaint String?
+  historyOfIllness String? // Bệnh sử
+  examination    String? // Khám lâm sàng
+  startedAt      DateTime        @default(now()) @db.Timestamptz(3)
+  closedAt       DateTime?       @db.Timestamptz(3)
+
+  patient         Patient           @relation(fields: [patientId], references: [id])
+  appointment     Appointment?      @relation(fields: [appointmentId], references: [id])
+  doctor          Staff?            @relation(fields: [doctorId], references: [id])
+  vitalSigns      VitalSign[]
+  painAssessments PainAssessment[]
+  orders          ClinicalOrder[]
+  diagnoses       Diagnosis[]
+  treatmentPlan   TreatmentPlan?
+  prescriptions   Prescription[]
+  procedures      ProcedureRecord[]
+  invoice         Invoice?
+
+  @@index([patientId, startedAt])
+  @@index([status])
+  @@map("encounters")
+}
+
+model VitalSign {
+  id          String   @id @default(uuid()) @db.Uuid
+  encounterId String   @db.Uuid
+  pulse       Int?
+  systolic    Int?
+  diastolic   Int?
+  temperature Decimal? @db.Decimal(4, 1)
+  spo2        Int?
+  weightKg    Decimal? @db.Decimal(5, 1)
+  heightCm    Decimal? @db.Decimal(5, 1)
+  recordedAt  DateTime @default(now()) @db.Timestamptz(3)
+
+  encounter Encounter @relation(fields: [encounterId], references: [id], onDelete: Cascade)
+
+  @@map("vital_signs")
+}
+
+/// Đánh giá cơn đau. score luôn quy đổi về thang 0–10 (VAS mm / 10) để vẽ chung một trục.
+model PainAssessment {
+  id           String      @id @default(uuid()) @db.Uuid
+  patientId    String      @db.Uuid
+  encounterId  String?     @db.Uuid
+  scale        PainScale
+  score        Decimal     @db.Decimal(3, 1) // 0.0 – 10.0 (CHECK constraint)
+  vasMm        Int? // Giá trị gốc 0–100 mm nếu đo VAS
+  bodyRegion   String // "Thắt lưng", "Cổ", "Gối P"...
+  painType     PainType?
+  context      PainContext
+  note         String?
+  recordedById String?     @db.Uuid
+  recordedAt   DateTime    @default(now()) @db.Timestamptz(3)
+
+  patient    Patient    @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  encounter  Encounter? @relation(fields: [encounterId], references: [id])
+  recordedBy Staff?     @relation(fields: [recordedById], references: [id])
+
+  @@index([patientId, recordedAt])
+  @@map("pain_assessments")
+}
+
+/// Chỉ định cận lâm sàng: X-quang, MRI, xét nghiệm...
+model ClinicalOrder {
+  id            String      @id @default(uuid()) @db.Uuid
+  encounterId   String      @db.Uuid
+  serviceId     String      @db.Uuid
+  orderedById   String      @db.Uuid
+  status        OrderStatus @default(ORDERED)
+  indication    String?
+  resultText    String?
+  resultFileUrl String? // Lưu file ở object storage (S3/MinIO), không lưu blob trong DB
+  orderedAt     DateTime    @default(now()) @db.Timestamptz(3)
+  resultedAt    DateTime?   @db.Timestamptz(3)
+
+  encounter Encounter @relation(fields: [encounterId], references: [id], onDelete: Cascade)
+  service   Service   @relation(fields: [serviceId], references: [id])
+  orderedBy Staff     @relation(fields: [orderedById], references: [id])
+
+  @@index([encounterId])
+  @@map("clinical_orders")
+}
+
+model Diagnosis {
+  id          String  @id @default(uuid()) @db.Uuid
+  encounterId String  @db.Uuid
+  icd10Code   String // vd: M54.5 Đau thắt lưng, M51.1 Thoát vị đĩa đệm có bệnh rễ
+  description String
+  isPrimary   Boolean @default(false)
+
+  encounter Encounter @relation(fields: [encounterId], references: [id], onDelete: Cascade)
+
+  @@index([icd10Code])
+  @@map("diagnoses")
+}
+
+model TreatmentPlan {
+  id           String   @id @default(uuid()) @db.Uuid
+  encounterId  String   @unique @db.Uuid
+  goals        String? // vd: "Giảm VAS ≥ 50%, đi bộ > 30 phút"
+  plan         String
+  followUpDays Int?
+  createdAt    DateTime @default(now()) @db.Timestamptz(3)
+
+  encounter Encounter @relation(fields: [encounterId], references: [id], onDelete: Cascade)
+
+  @@map("treatment_plans")
+}
+
+model ProcedureRecord {
+  id             String        @id @default(uuid()) @db.Uuid
+  encounterId    String        @db.Uuid
+  serviceId      String        @db.Uuid
+  procedureType  ProcedureType
+  performedById  String        @db.Uuid
+  laterality     Laterality?
+  level          String? // "L4-L5", "C5-C6", "Hạch sao"...
+  guidance       ImageGuidance @default(NONE)
+  consentSigned  Boolean       @default(false)
+  complications  String?
+  notes          String?
+  performedAt    DateTime      @default(now()) @db.Timestamptz(3)
+
+  encounter   Encounter         @relation(fields: [encounterId], references: [id])
+  service     Service           @relation(fields: [serviceId], references: [id])
+  performedBy Staff             @relation(fields: [performedById], references: [id])
+  supplies    ProcedureSupply[]
+
+  @@index([performedAt])
+  @@map("procedure_records")
+}
+
+/// Vật tư/thuốc dùng trong thủ thuật → sinh StockMovement(PROCEDURE_USE) + InvoiceItem(SUPPLY).
+model ProcedureSupply {
+  id          String @id @default(uuid()) @db.Uuid
+  procedureId String @db.Uuid
+  itemId      String @db.Uuid
+  quantity    Int
+
+  procedure ProcedureRecord @relation(fields: [procedureId], references: [id], onDelete: Cascade)
+  item      InventoryItem   @relation(fields: [itemId], references: [id])
+
+  @@map("procedure_supplies")
+}
+
+model Prescription {
+  id          String             @id @default(uuid()) @db.Uuid
+  encounterId String             @db.Uuid
+  doctorId    String             @db.Uuid
+  status      PrescriptionStatus @default(DRAFT)
+  note        String?
+  issuedAt    DateTime?          @db.Timestamptz(3)
+  dispensedAt DateTime?          @db.Timestamptz(3)
+
+  encounter Encounter          @relation(fields: [encounterId], references: [id])
+  doctor    Staff              @relation(fields: [doctorId], references: [id])
+  items     PrescriptionItem[]
+
+  @@map("prescriptions")
+}
+
+model PrescriptionItem {
+  id             String @id @default(uuid()) @db.Uuid
+  prescriptionId String @db.Uuid
+  itemId         String @db.Uuid
+  dosage         String // "75 mg"
+  frequency      String // "2 lần/ngày"
+  durationDays   Int
+  quantity       Int
+  instructions   String?
+
+  prescription Prescription  @relation(fields: [prescriptionId], references: [id], onDelete: Cascade)
+  item         InventoryItem @relation(fields: [itemId], references: [id])
+
+  @@map("prescription_items")
+}
+
+// ──────────────────────── Scheduling ────────────────────────────────────────
+
+model Room {
+  id       String   @id @default(uuid()) @db.Uuid
+  name     String   @unique
+  type     RoomType
+  isActive Boolean  @default(true)
+
+  appointments Appointment[]
+  shifts       WorkShift[]
+
+  @@map("rooms")
+}
+
+/// Danh mục dịch vụ: khám, thủ thuật, CLS, VLTL. durationMin + bufferAfterMin quyết định
+/// thời lượng chiếm lịch (vd: tiêm NMC 45' + 15' vệ sinh/theo dõi sau tiêm).
+model Service {
+  id               String      @id @default(uuid()) @db.Uuid
+  code             String      @unique
+  name             String
+  type             ServiceType
+  durationMin      Int
+  bufferAfterMin   Int         @default(0)
+  price            Decimal     @db.Decimal(14, 2)
+  requiresRoomType RoomType?
+  bookableOnline   Boolean     @default(false) // Thủ thuật xâm lấn thường chỉ do BS chỉ định
+  isActive         Boolean     @default(true)
+
+  appointments   Appointment[]
+  clinicalOrders ClinicalOrder[]
+  procedures     ProcedureRecord[]
+
+  @@map("services")
+}
+
+/// Ca trực / lịch làm việc. Không chồng ca cho cùng một nhân sự (EXCLUDE constraint).
+model WorkShift {
+  id      String   @id @default(uuid()) @db.Uuid
+  staffId String   @db.Uuid
+  roomId  String?  @db.Uuid
+  startAt DateTime @db.Timestamptz(3)
+  endAt   DateTime @db.Timestamptz(3)
+  note    String?
+
+  staff Staff @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  room  Room? @relation(fields: [roomId], references: [id])
+
+  @@index([staffId, startAt])
+  @@map("work_shifts")
+}
+
+/// blockedUntil = endAt + service.bufferAfterMin — khoảng bác sĩ/phòng bị chiếm thực tế.
+/// "version" dùng cho optimistic locking khi đổi lịch / đổi trạng thái.
+model Appointment {
+  id           String            @id @default(uuid()) @db.Uuid
+  code         String            @unique
+  patientId    String            @db.Uuid
+  providerId   String            @db.Uuid
+  serviceId    String            @db.Uuid
+  roomId       String?           @db.Uuid
+  startAt      DateTime          @db.Timestamptz(3)
+  endAt        DateTime          @db.Timestamptz(3)
+  blockedUntil DateTime          @db.Timestamptz(3)
+  status       AppointmentStatus @default(CONFIRMED)
+  source       AppointmentSource
+  reason       String?
+  note         String?
+  cancelReason String?
+  createdById  String            @db.Uuid
+  version      Int               @default(0)
+  createdAt    DateTime          @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime          @updatedAt @db.Timestamptz(3)
+
+  patient   Patient    @relation(fields: [patientId], references: [id])
+  provider  Staff      @relation(fields: [providerId], references: [id])
+  service   Service    @relation(fields: [serviceId], references: [id])
+  room      Room?      @relation(fields: [roomId], references: [id])
+  createdBy User       @relation(fields: [createdById], references: [id])
+  encounter Encounter?
+
+  @@index([providerId, startAt])
+  @@index([patientId, startAt])
+  @@index([startAt, status])
+  @@map("appointments")
+}
+
+// ──────────────────── Pharmacy & Inventory ──────────────────────────────────
+
+model InventoryItem {
+  id               String        @id @default(uuid()) @db.Uuid
+  sku              String        @unique
+  name             String
+  activeIngredient String?
+  strength         String? // "2%", "40 mg/ml"
+  kind             InventoryKind
+  unit             String // "ống", "lọ", "viên", "cái"
+  minStock         Int           @default(0) // Ngưỡng cảnh báo tồn kho thấp
+  salePrice        Decimal       @db.Decimal(14, 2)
+  isControlled     Boolean       @default(false) // Thuốc gây nghiện/hướng thần: sổ theo dõi riêng
+  isActive         Boolean       @default(true)
+
+  batches           StockBatch[]
+  movements         StockMovement[]
+  prescriptionItems PrescriptionItem[]
+  procedureSupplies ProcedureSupply[]
+  allergies         Allergy[]
+
+  @@map("inventory_items")
+}
+
+/// Tồn kho theo lô + hạn dùng → xuất kho FEFO (First-Expired-First-Out).
+model StockBatch {
+  id         String   @id @default(uuid()) @db.Uuid
+  itemId     String   @db.Uuid
+  lotNo      String
+  expiryDate DateTime @db.Date
+  quantity   Int // CHECK (quantity >= 0)
+  costPrice  Decimal  @db.Decimal(14, 2)
+  receivedAt DateTime @default(now()) @db.Timestamptz(3)
+
+  item      InventoryItem   @relation(fields: [itemId], references: [id])
+  movements StockMovement[]
+
+  @@unique([itemId, lotNo])
+  @@index([itemId, expiryDate])
+  @@map("stock_batches")
+}
+
+/// Sổ cái xuất nhập (append-only). quantity âm = xuất, dương = nhập.
+model StockMovement {
+  id            String            @id @default(uuid()) @db.Uuid
+  itemId        String            @db.Uuid
+  batchId       String            @db.Uuid
+  type          StockMovementType
+  quantity      Int
+  refType       String? // "PRESCRIPTION" | "PROCEDURE" | "RECEIPT"...
+  refId         String?           @db.Uuid
+  performedById String            @db.Uuid
+  createdAt     DateTime          @default(now()) @db.Timestamptz(3)
+
+  item  InventoryItem @relation(fields: [itemId], references: [id])
+  batch StockBatch    @relation(fields: [batchId], references: [id])
+
+  @@index([itemId, createdAt])
+  @@index([refType, refId])
+  @@map("stock_movements")
+}
+
+// ───────────────────────── Billing ──────────────────────────────────────────
+
+model Invoice {
+  id               String        @id @default(uuid()) @db.Uuid
+  code             String        @unique
+  patientId        String        @db.Uuid
+  encounterId      String?       @unique @db.Uuid
+  status           InvoiceStatus @default(DRAFT)
+  subtotal         Decimal       @default(0) @db.Decimal(14, 2)
+  discount         Decimal       @default(0) @db.Decimal(14, 2)
+  insuranceCovered Decimal       @default(0) @db.Decimal(14, 2)
+  total            Decimal       @default(0) @db.Decimal(14, 2) // = subtotal - discount - insuranceCovered
+  paidAmount       Decimal       @default(0) @db.Decimal(14, 2) // công nợ = total - paidAmount
+  createdById      String        @db.Uuid
+  issuedAt         DateTime?     @db.Timestamptz(3)
+  createdAt        DateTime      @default(now()) @db.Timestamptz(3)
+
+  patient   Patient       @relation(fields: [patientId], references: [id])
+  encounter Encounter?    @relation(fields: [encounterId], references: [id])
+  items     InvoiceItem[]
+  payments  Payment[]
+
+  @@index([issuedAt])
+  @@index([status])
+  @@map("invoices")
+}
+
+model InvoiceItem {
+  id            String          @id @default(uuid()) @db.Uuid
+  invoiceId     String          @db.Uuid
+  kind          InvoiceItemKind
+  refId         String?         @db.Uuid // serviceId / inventoryItemId
+  description   String
+  quantity      Int
+  unitPrice     Decimal         @db.Decimal(14, 2)
+  amount        Decimal         @db.Decimal(14, 2)
+  insuranceRate Decimal         @default(0) @db.Decimal(5, 2) // 0–100 (%)
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@map("invoice_items")
+}
+
+model Payment {
+  id           String        @id @default(uuid()) @db.Uuid
+  invoiceId    String        @db.Uuid
+  amount       Decimal       @db.Decimal(14, 2)
+  method       PaymentMethod
+  reference    String? // Mã giao dịch chuyển khoản / POS
+  receivedById String        @db.Uuid
+  paidAt       DateTime      @default(now()) @db.Timestamptz(3)
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id])
+
+  @@index([paidAt])
+  @@map("payments")
+}
+
+// ───────────────────── Cross-cutting ────────────────────────────────────────
+
+/// Nhật ký truy cập/sửa hồ sơ — bắt buộc với dữ liệu sức khỏe (ai xem/sửa gì, khi nào).
+model AuditLog {
+  id        String   @id @default(uuid()) @db.Uuid
+  actorId   String?  @db.Uuid
+  action    String // "appointment.create", "emr.read"...
+  entity    String
+  entityId  String?
+  ip        String?
+  meta      Json?
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  actor User? @relation(fields: [actorId], references: [id])
+
+  @@index([entity, entityId])
+  @@index([actorId, createdAt])
+  @@map("audit_logs")
+}
+
+/// Transactional Outbox: ghi cùng transaction với nghiệp vụ, worker gửi SMS/Zalo/Email sau.
+/// Đảm bảo không "đặt lịch thành công nhưng mất thông báo" hoặc ngược lại.
+model NotificationOutbox {
+  id            String              @id @default(uuid()) @db.Uuid
+  channel       NotificationChannel
+  recipient     String
+  template      String // "appointment.confirmed" | "appointment.rescheduled" | ...
+  payload       Json
+  status        OutboxStatus        @default(PENDING)
+  attempts      Int                 @default(0)
+  nextAttemptAt DateTime            @default(now()) @db.Timestamptz(3)
+  lastError     String?
+  createdAt     DateTime            @default(now()) @db.Timestamptz(3)
+  sentAt        DateTime?           @db.Timestamptz(3)
+
+  @@index([status, nextAttemptAt])
+  @@map("notification_outbox")
+}

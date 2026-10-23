@@ -1,0 +1,39 @@
+@import "tailwindcss";
+
+/*
+ * Design tokens — "Clean & Medical"
+ * brand        #2563eb  hành động chính, đường biểu đồ
+ * brand-accent #0284c7  điểm nhấn, mốc thủ thuật
+ * canvas       #f8fafc  nền ứng dụng
+ */
+@theme {
+  --font-sans: var(--font-be-vietnam), ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+
+  --color-brand: #2563eb;
+  --color-brand-hover: #1d4ed8;
+  --color-brand-soft: #eff6ff;
+  --color-brand-accent: #0284c7;
+  --color-canvas: #f8fafc;
+  --color-line: #e2e8f0;
+  --color-ink: #0f172a;
+  --color-muted: #64748b;
+
+  /* Mức độ đau — chỉ dùng cho thông tin lâm sàng, không dùng để trang trí */
+  --color-pain-none: #64748b;
+  --color-pain-mild: #059669;
+  --color-pain-moderate: #d97706;
+  --color-pain-severe: #e11d48;
+}
+
+@layer base {
+  html {
+    -webkit-tap-highlight-color: transparent;
+  }
+  body {
+    @apply bg-canvas text-ink antialiased;
+    font-feature-settings: "tnum" 1; /* số canh cột — quan trọng với bảng/chỉ số */
+  }
+  :focus-visible {
+    @apply outline-2 outline-offset-2 outline-brand;
+  }
+}
